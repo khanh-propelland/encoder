@@ -50,8 +50,7 @@ class Encoder:
                 #  Each pin is 16 bits behind the previous
                 offset = (pos - (1 - pinOrder[pin]) * 16) % 128 / 8
                 if track[offset] & mask:  # is the bit set?
-                    index |= 0b00000001 << pin  # set that pin's bit in the index byte
-
+                    index |= 0b00000001 << (pinOrder[pin] -1)  # set that pin's bit in the index byte
             self._map[index] = pos  # record the position in the map
         if self.saveFile:
             try:
@@ -71,18 +70,19 @@ class Encoder:
 
     def readPins(self):
 
-        self.current_index = '0b00000000'
+        self.current_index = '0b11111111'
         self.list_index = list(self.current_index)
         
         for i in range(0,8):
             if GPIO.input(self.pins[i]) == False:
-                self.list_index[i+2] = '1'
+                self.list_index[i+2] = '0'
+        
         self.string_index = ''.join(self.list_index)
         self.current_index = int(self.string_index, 2)     
         return self.current_index
 
     def rawPos(self):
-        print(self._map[self.readPins()])
+        
         return self._map[self.readPins()]
 
     def _raw2pos(self, raw):
@@ -151,7 +151,11 @@ class Encoder:
 if __name__ == "__main__":
     # DEVICE = 0x38  # Device address (A0-A2)
     encoder = Encoder(pins, saveFile="file.txt")
+    #print(encoder._map[74])
 
     while True:
-        
-        print(encoder.rawPos(), encoder.upos(), encoder.pos(), encoder.mpos())
+        #pass
+        #print(encoder.current_index, encoder._map[encoder.current_index], encoder.rawPos())
+        print(encoder.rawPos())
+        #print(encoder.rawPos(), encoder.upos(), encoder.pos(), encoder.mpos())
+  
