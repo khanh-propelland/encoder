@@ -10,7 +10,6 @@ import pickle
 import os
 from threading import Thread, Timer
 from time import sleep
-import rotmute as rotmute
 import signal
 import subprocess
 import sys
@@ -63,31 +62,26 @@ knobValueData = {
 # signal to the main thread that there's something in there. 
 QUEUE = Queue()
 EVENT = threading.Event()
+    
+    
+class Encoder:
 
-class MuteButton:
-    def __init__(self, buttonPin, buttonCallback=None):
+    def __init__(self, pins, buttonPin, pinOrder=(8,7,6,5,4,3,2,1), buttonCallback = None, saveFile=None):
+        self.reverse = False
+        self.saveFile = saveFile
+        self.lastGpio = None
+       
+        self.last_volume = None
+     
+        # setting up the pins as channels
+        self.pins = pins
         
+        # setting up the button
         self.gpioButton     = buttonPin
         self.buttonCallback = buttonCallback
         
         GPIO.setup(self.gpioButton, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.add_event_detect(self.gpioButton, GPIO.FALLING, self.buttonCallback, bouncetime=500)
-        
-    def buttonCallback(self, channel):
-        self.buttonCallback(GPIO.input(channel))
-    
-        
-
-class Encoder:
-
-    def __init__(self, pins, pinOrder=(8,7,6,5,4,3,2,1), callback = None, saveFile=None):
-        self.reverse = False
-        self.saveFile = saveFile
-        self.lastGpio = None
-        self.callback = callback
-     
-        # setting up the pins as channels
-        self.pins = pins
+        GPIO.add_event_detect(self.gpioButton, GPIO.FALLING, self.buttonCallback, bouncetime=1000)
         
         # create encoder map on the fly - ported from make_encodermap.ino
         # track binary data taken from p1 column on datasheet
@@ -129,7 +123,7 @@ class Encoder:
     def readPins(self):
 
         self.current_index = '0b11111111'
-        self.list_index = list(self.current_index)
+        self.list_index = list(str(self.current_index))
         
         for i in range(0,8):
             if GPIO.input(self.pins[i]) == False:
@@ -195,21 +189,18 @@ class Encoder:
     def mapToVolume(self):
         rawpos = self.rawPos()
         posSpan = 128
-        volSpan = 100
+        volSpan = 60
         
-        volume =  math.ceil((volSpan * rawpos) / (posSpan))
-        QUEUE.put(volume)
-        EVENT.set()
-
-        return volume
+        volume =  40 + math.ceil((volSpan * rawpos) / (posSpan))
+        #QUEUE.put(volume)
+        #EVENT.set()
+        self.stored_volume = volume
+        #print(volume)
+        return (volume, self._callback(volume))
     
-    
-    def _callback(self):
-        volume = self.mapToVolume()
-        time.sleep(1)
-        new_volume = self.mapToVolume()
+    def _callback(self, volume):
        
-        if new_volume != volume:
+        if volume != self.last_volume:
             
   
         #self.callback(1, vol = new_volume)
@@ -217,24 +208,17 @@ class Encoder:
             QUEUE.put(volume)
             EVENT.set()
         
+        self.last_volume = volume
         return volume
-##
-    def callback(self):
-        pass
-##        volume = self.mapToVolume()
-##        time.sleep(1)
-##        new_volume = self.mapToVolume()
-##       
-##        if new_volume == volume:
-##            return
-##        print(new_volume)
-##        self.callback(1, vol = new_volume)
-        
-        #QUEUE.put(volume)
-        #EVENT.set()
-                
-
+    
             
+        
+    def buttonCallback(self, channel, vol = None):
+        #print(vol, self.stored_volume)
+        vol = self.mapToVolume() [0]
+
+
+        self.buttonCallback(GPIO.input(channel), self.stored_volume)
 
     def __saveData(self):
         if self.saveFile:
@@ -263,10 +247,6 @@ class Volume:
     self.delta = None
     self._sync()
     self.volume = volume 
-   
-##  def normalize(self, v):
-##      result = (v - 40)/60*(100)
-##      return int(result)
     
   def change(self, vol):
     
@@ -279,14 +259,6 @@ class Volume:
     global VOLUME
     self.volume = self._constrain(v)
    
-    #normalized = self.normalize(v)
-    
-    #VOLUME = normalized
-##    if normalized < 10:
-##        os.system("mpc volume 0")
-##        knobValueData["knobValue"] = "0"
-##        db.update(knobValueData)
-##    else:
     os.system("mpc volume " + str(v))
     knobValueData["knobValue"] = str(v)
     db.update(knobValueData)
@@ -294,8 +266,10 @@ class Volume:
     
     return self.volume
     
-  def toggle(self):
+  def toggle(self, vol):
     global VOLUME
+    self.volume = vol
+    #print(vol)
     if self.is_muted:
 
       os.system("mpc volume " + str(self.volume))
@@ -368,43 +342,34 @@ if __name__ == "__main__":
    
     gpioButton = GPIO_BUTTON       
           
-    def on_press(value):
-        print("button pressed")
-        v.toggle()
+    def on_press(vol):
+        #print("button pressed", vol)
+        vol = encoder.mapToVolume()[0]
+        #print("button pressed", vol)
+        #vol = QUEUE.get()
+        v.toggle(vol)
         EVENT.set()
 
-    def on_turn(value, volume):
-        QUEUE.put(volume)
-        EVENT.set()
                  
-    def on_exit(a, b):
+    def on_exit(pins):
         print("Exiting...")
         sys.exit(0)
       
-    encoder = Encoder(pins, callback=on_turn, saveFile="file.txt")
-    VOLUME = encoder._callback()
-    #VOLUME = encoder.mapToVolume()
-    muteButton = MuteButton(buttonPin=GPIO_BUTTON, buttonCallback=on_press)
+    encoder = Encoder(pins, buttonPin=GPIO_BUTTON, buttonCallback=on_press, saveFile="file.txt")
+    VOLUME = encoder.mapToVolume()
     v = Volume(volume=VOLUME)
     signal.signal(signal.SIGINT, on_exit)
 
-        
     def consume_queue():        
-        fixed = QUEUE.get()
-        handle_volume(fixed)
-        i = 0
+         
         while not QUEUE.empty():
-     
-          vol = QUEUE.get()   
-          if vol == fixed:
-              i += 1
-              if i == 2:
-                  handle_volume(vol)
-                  i = 0
+          vol = QUEUE.get()
+          handle_volume(vol)
+      
       
     def handle_volume(vol):
         if v.is_muted:
-            v.toggle()
+            v.toggle(vol)
         if vol != v.volume:
             v.change(vol)
 
@@ -413,7 +378,9 @@ if __name__ == "__main__":
     while True:
         #pass
         #EVENT.wait(100)
+        encoder.mapToVolume()
         consume_queue()
+        
         #print(encoder.lastGpio)
-        print(encoder.rawPos(), encoder.mapToVolume(), v.volume)
+        #print(encoder.rawPos(), encoder.mapToVolume(), v.volume)
         EVENT.clear()
