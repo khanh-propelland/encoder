@@ -48,7 +48,7 @@ class Encoder:
             for pin in range(0, 8):  # think about each pin
                 # which byte in track[] to look at.
                 #  Each pin is 16 bits behind the previous
-                offset = (pos - (1 - pinOrder[pin]) * 16) % 128 / 8
+                offset = int((pos - (1 - pinOrder[pin]) * 16) % 128 / 8)
                 if track[offset] & mask:  # is the bit set?
                     index |= 0b00000001 << (pinOrder[pin] -1)  # set that pin's bit in the index byte
             self._map[index] = pos  # record the position in the map
