@@ -1,0 +1,547 @@
+import pyrebase
+import os
+from gpiozero import Button
+from gpiozero import LED
+from threading import Thread
+import RPi.GPIO as GPIO
+from time import sleep
+from threading import Timer
+import time
+import math
+import statistics
+import threading
+import encoder_volume as encoder_volume
+from neopixel import *
+import argparse
+import signal
+
+# LED strip configuration:
+LED_COUNT      = 9     # Number of LED pixels.
+LED_PIN        = 12      # GPIO pin connected to the pixels (18 uses PWM!).
+LED_FREQ_HZ    = 800000  # LED signal frequency in hertz (usually 800khz)
+LED_DMA        = 10      # DMA channel to use for generating signal (try 10)
+LED_BRIGHTNESS = 255     # Set to 0 for darkest and 255 for brightest
+LED_INVERT     = False   # True to invert the signal (when using NPN transistor level shift)
+LED_CHANNEL    = 0       # set to '1' for GPIOs 13, 19, 41, 45 or 53
+
+GPIO.setmode(GPIO.BCM)
+
+# Assigning pins to buttona
+#button2 = Button(14)
+GPIO.setup(2, GPIO.IN, pull_up_down = GPIO.PUD_UP)
+GPIO.setup(3, GPIO.IN, pull_up_down = GPIO.PUD_UP)
+GPIO.setup(14, GPIO.IN, pull_up_down = GPIO.PUD_UP)
+#GPIO.setup(26, GPIO.IN, pull_up_down = GPIO.PUD_UP)
+GPIO.setup(27, GPIO.IN, pull_up_down = GPIO.PUD_UP)
+GPIO.setup(17, GPIO.IN, pull_up_down = GPIO.PUD_UP)
+GPIO.setup(22, GPIO.IN, pull_up_down = GPIO.PUD_UP)
+GPIO.setup(10, GPIO.IN, pull_up_down = GPIO.PUD_UP)
+
+# ADC variables
+SPICLK = 16
+SPIMISO = 23
+SPIMOSI = 7
+SPICS = 25
+# ADC analog channels
+potentiometer_adc = 1;
+proximity_adc = 0;
+                
+#global variables
+oldKnobValue = 0
+knobValue = 0
+ledOn = False
+proximityresults = []
+global buttonData
+inProximity = False
+radioState = False
+timerOn = False
+
+
+
+# set up the SPI interface pins
+GPIO.setup([SPIMOSI, SPICLK, SPICS], GPIO.OUT)
+GPIO.setup(SPIMISO, GPIO.IN)
+
+# defining and initializing strip
+strip = Adafruit_NeoPixel(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL)    # Intialize the library (must be called once before other functions).
+strip.begin()
+
+
+config = {
+  "apiKey": "AIzaSyDqK4y0KO-JarxVBgwSdvLl8m1IAaVQK8E",
+  "authDomain": "framer-test-1-ff664.firebaseapp.com",
+  "databaseURL": "https://framer-test-1-ff664.firebaseio.com/",
+  "storageBucket": "framer-test-1-ff664.appspot.com"
+}
+
+firebase = pyrebase.initialize_app(config)
+
+
+# Get a reference to the database service
+db = firebase.database()
+
+# data to save
+buttonData = {
+    "button": "0",   
+}
+
+proximityDataTrue = {  
+    "proximityState": "true",
+}
+
+proximityDataFalse = {  
+    "proximityState": "false",
+}
+
+knobValueData = {
+    "knobValue": "0",
+}
+
+ 
+# read analog data potentiometer and proximity sensor from MCP3008 chip, 8 possible adc's (0 thru 7)
+def readadc(adcnum, clockpin, mosipin, misopin, cspin):
+        if ((adcnum > 7) or (adcnum < 0)):
+                return -1
+        GPIO.output(cspin, True)
+ 
+        GPIO.output(clockpin, False)  # start clock low
+        GPIO.output(cspin, False)     # bring CS low
+ 
+        commandout = adcnum
+        commandout |= 0x18  # start bit + single-ended bit
+        commandout <<= 3    # we only need to send 5 bits here
+        for i in range(5):
+                if (commandout & 0x80):
+                        GPIO.output(mosipin, True)
+                else:
+                        GPIO.output(mosipin, False)
+                commandout <<= 1
+                GPIO.output(clockpin, True)
+                GPIO.output(clockpin, False)
+ 
+        adcout = 0
+        # read in one empty bit, one null bit and 10 ADC bits
+        for i in range(12):
+                GPIO.output(clockpin, True)
+                GPIO.output(clockpin, False)
+                adcout <<= 1
+                if (GPIO.input(misopin)):
+                        adcout |= 0x1
+ 
+        GPIO.output(cspin, True)
+        
+        adcout >>= 1       # first bit is 'null' so drop it
+        return adcout
+    
+# threaded function that reads proximity values every 3 seconds
+def proximity_check():
+    global proximityresults
+    global inProximity
+    threading.Timer(1.0, proximity_check).start()
+    for x in range(10):
+        proximityVal = readadc(proximity_adc, SPICLK, SPIMOSI, SPIMISO, SPICS)
+        proximityresults.append(proximityVal)
+    average = statistics.mean(proximityresults)
+    stderror = statistics.stdev(proximityresults)/10.0
+    proximityresults = []
+    sleep(0.02)
+    #print(average-stderror)
+    
+    if average - stderror > 250 and not inProximity:
+        results = db.update(proximityDataTrue)
+        inProximity = True
+    elif average - stderror < 250:
+        results = db.update(proximityDataFalse)
+        inProximity = False
+        
+
+        
+# Conerts RGB values between 0-255 into a 8 bit number
+def Color(red, green, blue, white = 0):
+	return (white << 24) | (red << 16)| (green << 8) | blue
+
+# Sets led strip to RGB color it is given
+def setPixelColorRGB(strip, red, green, blue, white = 0):
+		"""Set LED at position n to the provided red, green, and blue color.
+		Each color component should be a value from 0 to 255 (where 0 is the
+		lowest intensity and 255 is the highest intensity).
+		"""
+		
+		for i in range(strip.numPixels()):
+                    
+                    strip.setPixelColor(i, Color(red, green, blue, white))
+		strip.show()
+		
+# Sets LED strip to a rainbow animation		
+def rainbow(strip, wait_ms=20, iterations=1):   
+    """Draw rainbow that fades across all pixels at once."""
+    brightness = [0, 2, 4, 8, 16, 32, 64, 96, 128, 160, 192, 224, 240, 255]
+    start_time = time.time()
+    brightnessSteps = len(brightness)
+    fullBrightSteps = 5
+    initialColor = 120
+    
+    # fade in
+    for j in range(brightnessSteps):
+        for i in range(strip.numPixels()):
+                
+              #if time.time() - start_time < 5.0:
+                strip.setPixelColor(i, wheel((i+j) & 255, brightness, j, "in"))
+                #strip.show()
+              #else:
+               #return
+                #time.sleep(0.05)
+        strip.show()
+        time.sleep(0.08)
+    #full brightness
+    for j in range(fullBrightSteps):
+          #if time.time() - start_time < 5.0:
+        for i in range(strip.numPixels()):
+            strip.setPixelColor(i, wheel((i+j + brightnessSteps) & 255, brightness, j, "normal"))
+            #strip.show()
+        strip.show()
+        time.sleep(0.08)
+    
+    for j in range(brightnessSteps):
+        for i in range(strip.numPixels()):
+              #if time.time() - start_time < 5.0:
+                strip.setPixelColor(i, wheel((i+j + brightnessSteps + fullBrightSteps) & 255, brightness,j,"out"))
+                
+                #time.sleep(0.05)
+        strip.show()
+        time.sleep(0.08)
+    
+        
+
+def colorWipe(strip, color, wait_ms=50):
+    """Wipe color across display a pixel at a time."""
+    for i in range(strip.numPixels()):
+        strip.setPixelColor(i, color)
+        strip.show()
+        time.sleep(wait_ms/1000.0)
+        
+def wheel(pos, brightness, j, state):
+    shifted = pos + 120
+    """Generate rainbow colors across 0-255 positions."""
+    if shifted < 85:
+        
+        if state == "in":
+            
+            
+            return Color(int(shifted*3 * brightness[j]/255.0), int((255 - shifted * 3) *brightness[j]/255.0), 0) #pos*3
+        elif state == "out":
+            return Color(int(shifted*3 * brightness[13 - j]/255.0), int((255 - shifted * 3)* brightness[13 -j]/255.0), 0)
+        else:
+            return Color(shifted*3 , (255 - shifted * 3), 0)
+
+            
+        
+    elif shifted < 170:
+        shifted -= 85
+        
+        if state == "in":
+
+            return Color(int((255 - shifted*3)* brightness[j]/255.0), 0, int(shifted * 3* brightness[j]/255.0))
+        elif state == "out":
+            return Color(int((255 - shifted*3)* brightness[13 - j]/255.0), 0, int(shifted * 3 * brightness[13 -j]/255.0))
+        else:
+            return Color(255 - shifted*3, 0, shifted * 3)
+    else:
+        shifted -= 170
+        
+        if state == "in":
+            return Color(0, int(shifted*3* brightness[j]/255.0), int((255 - shifted * 3)*brightness[j]/255.0))
+        elif state == "out":
+            return Color(0, int(shifted*3* brightness[13 -j]/255.0), int((255 - shifted * 3)* brightness[13 -j]/255.0))
+        else :
+            return Color(0, shifted*3, 255 - shifted * 3)
+
+def timerTurnOff():
+    global timerOn
+    timerOn = True
+    start_time = time.time()
+    while timerOn:
+        if time.time() - start_time >  3.0 and timerOn:
+            timerOn = False
+            turnOff()       
+    
+    
+def ledVolumeControl(strip, wait_ms=50):
+    """Wipe color across display a pixel at a time."""
+    color = Color(230, 230, 230)
+    for i in range(strip.numPixels()):
+        strip.setPixelColor(i, Color(0,0,0))
+    time.sleep(0.05)
+    num = int(encoder_volume.VOLUME/10.0)
+    print("VOLUME " +str(encoder_volume.VOLUME))
+  
+    if num != 0:    
+        for i in range(num):
+            strip.setPixelColor(8 - i, color)
+            
+    strip.show()
+    
+   
+##    thread = Thread(target= timerTurnOff)
+##    thread.start()
+##    t = Timer(3, turnOff)
+##    t.start()
+              
+    
+    #time.sleep(2)
+    #turnOff(strip)
+        
+def fadeInfadeOut():
+    
+    
+    brightness = [2,4,8,16,32,64,128,192, 224, 255, 224, 192, 128, 64, 32, 16, 8, 4, 2, 0, 0, 0, 0, 0, 0]
+    pixelBrightness = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+    
+    while ledOn:
+        for i in brightness:
+            for j in range(4):
+                pixelBrightness[8 - j] = pixelBrightness[8 - j- 1]
+                pixelBrightness[j] = pixelBrightness[1 + j]
+            pixelBrightness[4] = i
+            
+    ##        if not ledOn:
+    ##            return
+            
+            for pixel in range(5):
+                r1 = int(20*(pixelBrightness[4 - pixel]/255.0))
+                g1 = int(180*(pixelBrightness[4 - pixel]/255.0))
+                b1 = int(200*(pixelBrightness[4 - pixel]/255.0))
+                
+                r2 = int(20*(pixelBrightness[4 + pixel]/255.0))
+                g2 = int(180*(pixelBrightness[4 + pixel]/255.0))
+                b2 = int(200*(pixelBrightness[4 + pixel]/255.0))
+                if ledOn:
+                    strip.setPixelColor(4-pixel, Color(g1,r1,b1))
+                    strip.setPixelColor(4+pixel, Color(g2,r2,b2))
+                #strip.show()
+                #time.sleep(0.05)
+            strip.show()
+            time.sleep(0.1)
+            
+        
+        
+# turns off LED    
+def turnOff():
+    time.sleep(0.1)
+    for i in range(strip.numPixels()):
+        strip.setPixelColor(i, Color(0,0,0))
+    strip.show()
+
+# asynchronous button press function to turn off LED
+def button0Pressed(channel):
+    print("Button 0 Pressed")
+    global buttonData
+    global ledOn
+    buttonData["button"] = "0"
+    results = db.update(buttonData)
+    #colorWipe(strip, Color(0,255,128), 10)
+##    global ledOn
+##    ledOn = False
+##    turnOff(strip)
+    
+
+# asynchronous button press function to turn off LED
+def button1Pressed(channel):
+    print("Button1 pressed")
+    global buttonData
+    global ledOn
+    buttonData["button"] = "1"
+    results = db.update(buttonData)
+    
+    
+# asynchronous button press function to turn off LED
+def button2Pressed(channel):
+    print("Button2 pressed")
+    global buttonData
+    global ledOn
+    buttonData["button"] = "2"
+    results = db.update(buttonData)
+   
+##    
+# asynchronous button press function to turn off LED
+def button3Pressed(channel):
+    print("Button3 pressed")
+    global buttonData
+    buttonData["button"] = "3"
+    results = db.update(buttonData)
+    
+
+
+# action to take when button 4 is pressed
+def button4Pressed(channel):
+    print("Button4 pressed")
+    global buttonData
+    buttonData["button"] = "4"
+    results = db.update(buttonData)
+   
+    
+# action to take when button 5 is pressed   
+def button5Pressed(channel):
+    print("Button5 pressed")
+    global buttonData
+    buttonData["button"] = "5"
+    results = db.update(buttonData)
+    
+    
+# action to take when button 6 is pressed    
+def button6Pressed(channel):
+    print("Button6 pressed")
+    global buttonData
+    buttonData["button"] = "6"
+    results = db.update(buttonData)
+    
+    
+# assigning buttons to asynchronous functions
+GPIO.add_event_detect(27, GPIO.FALLING, callback = button3Pressed, bouncetime=300)
+#GPIO.add_event_detect(26, GPIO.FALLING, callback = knobButtonPressed, bouncetime=300)
+GPIO.add_event_detect(17, GPIO.FALLING, callback = button4Pressed, bouncetime=300)
+GPIO.add_event_detect(22, GPIO.FALLING, callback = button5Pressed, bouncetime=300)
+GPIO.add_event_detect(10, GPIO.FALLING, callback = button6Pressed, bouncetime=300)
+GPIO.add_event_detect(2, GPIO.FALLING, callback = button0Pressed, bouncetime=300)
+GPIO.add_event_detect(3, GPIO.FALLING, callback = button1Pressed, bouncetime=300)
+GPIO.add_event_detect(14, GPIO.FALLING, callback = button2Pressed, bouncetime=300)   
+
+# firebase event handlig
+def radioStation_handler(message):
+    global radioState
+    global ledOn
+    if int(message["data"]) > 8:
+       os.system("mpc volume 100")
+       radioState = False
+    
+    if message["data"] == "0":
+        os.system("mpc stop")   
+        radioState = False
+    else:
+        os.system("mpc play " + message["data"])
+        if int(message["data"]) < 9:
+            radioState = True
+        
+    if message["data"] == "12" or message["data"] == "11": 
+        ledOn = True
+        thread = Thread(target= fadeInfadeOut)
+        thread.start()
+        
+    if message["data"] == "10" or message["data"] == "9":    
+        ledOn = False
+        time.sleep(0.05)
+        turnOff()
+
+def idle_handler(message):
+    print("idle")
+    if message["data"] == "false":
+        rainbow(strip)
+        turnOff()
+         
+def initialize_radio():
+    turnOff()
+    os.system("mpc clear")
+    os.system("mpc add EuropaFM.mp3")
+    os.system("mpc add CadenaDial.mp3")
+    os.system("mpc add Radiole.mp3")
+    os.system("mpc add Cope.mp3")
+    os.system("mpc add OndaCero.mp3")
+    os.system("mpc add Cadena100.mp3")
+    os.system("mpc add KissFM.mp3")
+    os.system("mpc add CadenaSer.mp3")
+    os.system("mpc add phoneConversation.mp3")
+    os.system("mpc add socialTalkManAndWomanEdited.mp3")
+    os.system("mpc add incomingCall.m4a")
+    os.system("mpc add outgoingcall.m4a")
+    os.system("mpc repeat on")
+    os.system("mpc single on")
+
+my_stream = db.child("idle").stream(idle_handler)
+my_steam2 = db.child("radioStation").stream(radioStation_handler)
+# calling threaded function at the start        
+proximity_check()
+#checkPhysicalInput()
+initialize_radio()
+
+##while True:
+##    fadeInfadeOut(strip)
+
+
+GPIO_BUTTON = encoder_volume.GPIO_BUTTON
+pins = encoder_volume.pins
+
+#encoder_volume.main()
+
+def on_press(vol):
+    #if radioState:
+    vol = encoder.mapToVolume()[0]
+    v.toggle(vol)
+    encoder_volume.EVENT.set()
+    ledVolumeControl(strip)
+    thread = Thread(target= timerTurnOff)
+    thread.start()
+
+def on_turn(vol):
+ 
+    
+    if radioState:
+        encoder_volume.QUEUE.put(vol)
+        encoder_volume.EVENT.set()
+
+def on_exit(pins, GPIO_BUTTON):
+    print("Exiting...")
+    encoder_volume.sys.exit(0) 
+
+
+
+if GPIO_BUTTON != None:
+
+    encoder = encoder_volume.Encoder(pins, buttonPin=GPIO_BUTTON, buttonCallback=on_press, saveFile="file.txt")
+    VOLUME = encoder.mapToVolume()
+    v = encoder_volume.Volume(volume=VOLUME)
+    signal.signal(signal.SIGINT, on_exit)
+
+
+def consume_queue():
+ 
+    global timerOn
+  
+    while not encoder_volume.QUEUE.empty():
+      timerOn = False
+      vol = encoder_volume.QUEUE.get()   
+      handle_volume(vol)
+
+    thread = Thread(target= timerTurnOff)
+    thread.start()
+
+    #fixed = encoder_volume.QUEUE.get()
+    #print(fixed)
+    #handle_volume(fixed)
+    #global timerOn
+    #i = 0
+    #while not encoder_volume.QUEUE.empty():
+      #timerOn = False
+      #vol = encoder_volume.QUEUE.get()   
+      #if vol == fixed:
+          #i += 1
+          #if i == 2:
+              #handle_volume(vol)
+              #i = 0
+    #thread = Thread(target= timerTurnOff)
+    #thread.start()
+
+def handle_volume(vol):
+    if v.is_muted:
+    	v.toggle(vol)
+    if vol != v.volume:
+        v.change(vol)
+    ledVolumeControl(strip)
+      
+
+
+# main loop
+while True:
+    #encoder_volume.EVENT.wait(1200)
+    encoder.mapToVolume()
+    consume_queue()
+    encoder_volume.EVENT.clear() 
